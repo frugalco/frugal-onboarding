@@ -1,0 +1,9 @@
+.claude
+
+# Credentials files - never commit these
+*credentials*.json
+frugal-*-credentials.json
+
+# OS generated files
+.DS_Store
+.DS_Store?
