@@ -2,5 +2,21 @@
 
 ## [2026-04-29]
 
-  ### Added   - Multi-account AWS support with cross-account role assumption   - GitLab integration alongside the existing GitHub flow   - Amazon Bedrock support for AI cost visibility   - RDS Performance Insights permissions for query-level metrics   - Compute Optimizer read access for rightsizing recommendations    ### Improved   - Cross-account assume-role flow hardened against silent failures, with retry handling for IAM eventual consistency and a pre-flight check that surfaces clear diagnostics for common cross-account misconfigurations   - Re-running setup is now idempotent: existing policies are versioned in place (handling the AWS 5-version limit automatically) and existing access keys are kept by default instead of triggering LimitExceeded   - Local credentials are validated against active access keys, with a warning when the stored credential is stale   - Clearer prompts and warnings when setup is re-run against an account that already has Frugal roles, or run against an AWS management account    ### Documentation   - New architecture diagram showing how the Frugal components fit together   - AWS multi-account setup guide with explicit management-account warnings   - Streamlined troubleshooting focused on the most common failure modes   - Updated GitHub fine-grained PAT permission guidance to match the currently available scopes
+### Added
+- Multi-account AWS support with cross-account role assumption
+- GitLab integration alongside the existing GitHub flow
+- Amazon Bedrock support for AI cost visibility
+- RDS Performance Insights permissions for query-level metrics
+- Compute Optimizer read access for rightsizing recommendations
 
+### Improved
+- Cross-account assume-role flow hardened against silent failures, with retry handling for IAM eventual consistency and a pre-flight check that surfaces clear diagnostics for common cross-account misconfigurations
+- Re-running setup is now idempotent: existing policies are versioned in place (handling the AWS 5-version limit automatically) and existing access keys are kept by default instead of triggering LimitExceeded
+- Local credentials are validated against active access keys, with a warning when the stored credential is stale
+- Clearer prompts and warnings when setup is re-run against an account that already has Frugal roles, or run against an AWS management account
+
+### Documentation
+- New architecture diagram showing how the Frugal components fit together
+- AWS multi-account setup guide with explicit management-account warnings
+- Streamlined troubleshooting focused on the most common failure modes
+- Updated GitHub fine-grained PAT permission guidance to match the currently available scopes
