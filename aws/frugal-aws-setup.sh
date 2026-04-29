@@ -215,6 +215,8 @@ READONLY_POLICIES_WITH_DESC=(
     "arn:aws:iam::aws:policy/job-function/ViewOnlyAccess|Read-only access to EC2, S3, RDS, Lambda, CloudWatch, and most AWS services"
     # Bedrock AI/ML read-only access
     "arn:aws:iam::aws:policy/AmazonBedrockReadOnly|Read-only access to AWS Bedrock AI models, configuration, and diagnostics"
+    # Compute Optimizer read-only access (rightsizing recommendations for EC2, RDS, etc.)
+    "arn:aws:iam::aws:policy/ComputeOptimizerReadOnlyAccess|Read-only access to AWS Compute Optimizer rightsizing recommendations"
 )
 
 # Extract just the policy ARNs for easy access
@@ -384,6 +386,58 @@ check_management_account() {
     fi
 }
 
+# Pre-check: verify current identity and test cross-account access before processing member accounts
+verify_cross_account_access() {
+    local test_account_id="$1"
+    local role_name="$2"
+    local role_arn="arn:aws:iam::${test_account_id}:role/${role_name}"
+
+    # Show current identity so the customer can verify they're using the right credentials
+    local caller_identity
+    caller_identity=$(aws sts get-caller-identity --output json 2>/dev/null)
+    local caller_arn=$(echo "$caller_identity" | jq -r '.Arn')
+    local caller_account=$(echo "$caller_identity" | jq -r '.Account')
+    print_info "Current identity: $caller_arn (account: $caller_account)"
+
+    # Test assume-role against the first member account
+    print_info "Verifying cross-account access to: $role_arn"
+    local test_error
+    test_error=$(aws sts assume-role \
+        --role-arn "$role_arn" \
+        --role-session-name "frugal-preflight-check" \
+        --duration-seconds 900 \
+        --output json 2>&1 >/dev/null)
+
+    if [ $? -eq 0 ]; then
+        print_info "✓ Cross-account access verified"
+        echo
+        return 0
+    fi
+
+    echo
+    print_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print_error "Cross-account access check failed"
+    print_error ""
+    print_error "  Identity:  $caller_arn"
+    print_error "  Target:    $role_arn"
+    print_error "  Error:     $test_error"
+    print_error ""
+    print_error "Common causes:"
+    print_error "  1. Wrong AWS credentials — verify you are authenticated as the management account"
+    print_error "     Run: aws sts get-caller-identity"
+    print_error "  2. Role does not exist — accounts invited (not created) into the organization"
+    print_error "     do not have the OrganizationAccountAccessRole by default"
+    print_error "  3. The role's trust policy does not allow access from this account"
+    print_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+    read -p "Do you want to continue anyway? Some accounts may still succeed. (y/N): " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        print_info "Setup cancelled. Please fix the credentials/permissions and re-run."
+        exit 0
+    fi
+    echo
+}
+
 # Function to assume a role in another account and set credentials
 assume_role_for_account() {
     local target_account_id="$1"
@@ -396,27 +450,42 @@ assume_role_for_account() {
     print_info "Assuming role: $role_arn"
 
     # Assume role and get temporary credentials
-    local credentials=$(aws sts assume-role \
+    # Capture stderr separately so CLI warnings don't corrupt JSON output
+    # NOTE: declare variables separately from assignment — in bash < 4.4 (macOS default),
+    # 'local var=$(cmd)' masks the exit code of cmd, always returning 0.
+    local stderr_file credentials exit_code
+    stderr_file=$(mktemp)
+    credentials=$(aws sts assume-role \
         --role-arn "$role_arn" \
         --role-session-name "$session_name" \
         --duration-seconds 3600 \
         --query 'Credentials' \
-        --output json 2>&1)
+        --output json 2>"$stderr_file")
+    exit_code=$?
 
-    if [ $? -ne 0 ]; then
+    if [ $exit_code -ne 0 ]; then
         print_error "Failed to assume role: $role_arn"
-        print_error "$credentials"
+        print_error "$(cat "$stderr_file")"
+        rm -f "$stderr_file"
         print_error ""
         print_error "Ensure the role exists and trusts this account:"
         print_error "  Role ARN: $role_arn"
         print_error "  Must trust: $(aws sts get-caller-identity --query Arn --output text 2>/dev/null || echo 'current identity')"
         return 1
     fi
+    rm -f "$stderr_file"
 
     # Extract credentials
-    local access_key=$(echo "$credentials" | jq -r '.AccessKeyId')
-    local secret_key=$(echo "$credentials" | jq -r '.SecretAccessKey')
-    local session_token=$(echo "$credentials" | jq -r '.SessionToken')
+    local access_key secret_key session_token
+    access_key=$(echo "$credentials" | jq -r '.AccessKeyId')
+    secret_key=$(echo "$credentials" | jq -r '.SecretAccessKey')
+    session_token=$(echo "$credentials" | jq -r '.SessionToken')
+
+    # Validate credentials were parsed successfully
+    if [[ -z "$access_key" || "$access_key" == "null" || -z "$secret_key" || "$secret_key" == "null" ]]; then
+        print_error "Failed to parse credentials from assume-role response"
+        return 1
+    fi
 
     # Export as environment variables for this account's operations
     export AWS_ACCESS_KEY_ID="$access_key"
@@ -656,18 +725,38 @@ create_iam_role_for_user_mode() {
 }
 EOF
 
-    if aws iam create-role \
-        --role-name "$ROLE_NAME" \
-        --assume-role-policy-document "file://$trust_policy_file" \
-        --description "Read-only access for Frugal monitoring via IAM user from account $primary_account_id" \
-        --tags "Key=Purpose,Value=FrugalIntegration" "Key=CreatedBy,Value=frugal-aws-setup"; then
-        print_info "IAM role created successfully"
-        rm -f "$trust_policy_file"
-    else
-        print_error "Failed to create IAM role"
-        rm -f "$trust_policy_file"
-        return 1
-    fi
+    # Retry loop to handle IAM eventual consistency — a newly created IAM user
+    # may not be recognized as a valid principal in cross-account trust policies
+    # for several seconds after creation.
+    local max_retries=6
+    local retry_delay=10
+    local attempt=1
+    while true; do
+        local create_output
+        create_output=$(aws iam create-role \
+            --role-name "$ROLE_NAME" \
+            --assume-role-policy-document "file://$trust_policy_file" \
+            --description "Read-only access for Frugal monitoring via IAM user from account $primary_account_id" \
+            --tags "Key=Purpose,Value=FrugalIntegration" "Key=CreatedBy,Value=frugal-aws-setup" 2>&1)
+
+        if [ $? -eq 0 ]; then
+            echo "$create_output"
+            print_info "IAM role created successfully"
+            rm -f "$trust_policy_file"
+            return 0
+        fi
+
+        if echo "$create_output" | grep -q "Invalid principal" && [ $attempt -lt $max_retries ]; then
+            print_info "IAM user not yet available as principal (IAM eventual consistency) — retrying in ${retry_delay}s (attempt $attempt/$max_retries)..."
+            sleep "$retry_delay"
+            attempt=$((attempt + 1))
+        else
+            print_error "Failed to create IAM role"
+            print_error "$create_output"
+            rm -f "$trust_policy_file"
+            return 1
+        fi
+    done
 }
 
 # Function to create IAM role for cross-account WIF access (trusts primary role)
@@ -698,18 +787,38 @@ create_iam_role_wif_cross_account() {
 }
 EOF
 
-    if aws iam create-role \
-        --role-name "$ROLE_NAME" \
-        --assume-role-policy-document "file://$trust_policy_file" \
-        --description "Read-only access for Frugal monitoring via role chaining from account $primary_account_id" \
-        --tags "Key=Purpose,Value=FrugalIntegration" "Key=CreatedBy,Value=frugal-aws-setup"; then
-        print_info "IAM role created successfully"
-        rm -f "$trust_policy_file"
-    else
-        print_error "Failed to create IAM role"
-        rm -f "$trust_policy_file"
-        return 1
-    fi
+    # Retry loop to handle IAM eventual consistency — a newly created IAM role
+    # may not be recognized as a valid principal in cross-account trust policies
+    # for several seconds after creation.
+    local max_retries=6
+    local retry_delay=10
+    local attempt=1
+    while true; do
+        local create_output
+        create_output=$(aws iam create-role \
+            --role-name "$ROLE_NAME" \
+            --assume-role-policy-document "file://$trust_policy_file" \
+            --description "Read-only access for Frugal monitoring via role chaining from account $primary_account_id" \
+            --tags "Key=Purpose,Value=FrugalIntegration" "Key=CreatedBy,Value=frugal-aws-setup" 2>&1)
+
+        if [ $? -eq 0 ]; then
+            echo "$create_output"
+            print_info "IAM role created successfully"
+            rm -f "$trust_policy_file"
+            return 0
+        fi
+
+        if echo "$create_output" | grep -q "Invalid principal" && [ $attempt -lt $max_retries ]; then
+            print_info "IAM principal not yet available (IAM eventual consistency) — retrying in ${retry_delay}s (attempt $attempt/$max_retries)..."
+            sleep "$retry_delay"
+            attempt=$((attempt + 1))
+        else
+            print_error "Failed to create IAM role"
+            print_error "$create_output"
+            rm -f "$trust_policy_file"
+            return 1
+        fi
+    done
 }
 
 # Function to add AssumeRole permissions to primary role for accessing additional accounts
@@ -845,19 +954,51 @@ attach_policies() {
 
 # Function to create access keys for IAM user
 create_access_keys() {
-    print_info "Creating access keys for IAM user..."
-    
-    # Check if credentials file already exists
-    if [ -f "$CREDENTIALS_FILE" ]; then
-        print_warning "Credentials file '${CREDENTIALS_FILE}' already exists."
-        read -p "Do you want to create new access keys and overwrite it? (y/N): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            print_info "Skipping access key creation"
-            return
+    print_info "Checking access keys for IAM user..."
+
+    # Check if the user already has active access keys
+    local existing_keys
+    existing_keys=$(aws iam list-access-keys --user-name "$ROLE_NAME" --output json 2>&1)
+    if [ $? -eq 0 ]; then
+        local active_key_count
+        active_key_count=$(echo "$existing_keys" | jq '[.AccessKeyMetadata[] | select(.Status == "Active")] | length')
+        if [ "$active_key_count" -gt 0 ]; then
+            local key_ids
+            key_ids=$(echo "$existing_keys" | jq -r '.AccessKeyMetadata[] | select(.Status == "Active") | .AccessKeyId')
+            print_info "IAM user already has $active_key_count active access key(s): $key_ids"
+            if [ -f "$CREDENTIALS_FILE" ]; then
+                local file_key_id
+                file_key_id=$(jq -r '.AccessKeyId // empty' "$CREDENTIALS_FILE" 2>/dev/null || true)
+                if echo "$key_ids" | grep -qx "$file_key_id"; then
+                    print_info "Existing credentials file matches an active access key: ${CREDENTIALS_FILE}"
+                else
+                    print_warning "Existing credentials file does not match any active access key and may be stale: ${CREDENTIALS_FILE}"
+                fi
+            else
+                print_warning "No local credentials file found. If you need the credentials, retrieve them from where they were originally stored."
+            fi
+            echo
+            read -p "Do you want to create new access keys anyway? (y/N): " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                print_info "Keeping existing access keys (skipping)"
+                return 0
+            fi
+            # Check if we'd hit the 2-key limit
+            local total_key_count
+            total_key_count=$(echo "$existing_keys" | jq '.AccessKeyMetadata | length')
+            if [ "$total_key_count" -ge 2 ]; then
+                print_error "Cannot create new access key: AWS limit of 2 access keys per user already reached"
+                print_info "To rotate keys, first delete an existing key:"
+                echo "  aws iam list-access-keys --user-name $ROLE_NAME"
+                echo "  aws iam delete-access-key --user-name $ROLE_NAME --access-key-id <KEY_ID>"
+                return 1
+            fi
         fi
     fi
-    
+
+    print_info "Creating access keys for IAM user..."
+
     # Create access key
     local key_output=$(aws iam create-access-key --user-name "$ROLE_NAME" --output json 2>&1)
     local exit_code=$?
@@ -895,11 +1036,9 @@ EOF
         # Check if it's a LimitExceeded error
         if echo "$key_output" | grep -q "LimitExceeded"; then
             print_error "Cannot create access key: AWS limit of 2 access keys per user already reached"
-            print_error "Please delete an existing access key first:"
-            print_error "  aws iam list-access-keys --user-name $ROLE_NAME"
-            print_error "  aws iam delete-access-key --user-name $ROLE_NAME --access-key-id <KEY_ID>"
-            print_error ""
-            print_error "Or use the existing credentials file if you have it"
+            print_info "To rotate keys, first delete an existing key:"
+            echo "  aws iam list-access-keys --user-name $ROLE_NAME"
+            echo "  aws iam delete-access-key --user-name $ROLE_NAME --access-key-id <KEY_ID>"
         else
             print_error "Failed to create access keys: $key_output"
         fi
@@ -908,6 +1047,81 @@ EOF
 }
 
 
+# Function to update custom policy if the document has changed
+# Handles version limit (max 5) by deleting oldest non-default version
+update_custom_policy_if_changed() {
+    local policy_arn="$1"
+    local desired_document="$2"
+
+    # Get current default version ID
+    local default_version_id
+    default_version_id=$(aws iam get-policy --policy-arn "$policy_arn" \
+        --query 'Policy.DefaultVersionId' --output text 2>&1)
+    if [ $? -ne 0 ]; then
+        print_error "Failed to get policy details: $default_version_id"
+        return 1
+    fi
+
+    # Get current policy document (URL-encoded by AWS, decode with jq)
+    local current_document
+    current_document=$(aws iam get-policy-version \
+        --policy-arn "$policy_arn" \
+        --version-id "$default_version_id" \
+        --query 'PolicyVersion.Document' --output json 2>&1)
+    if [ $? -ne 0 ]; then
+        print_error "Failed to get policy version document: $current_document"
+        return 1
+    fi
+
+    # Normalize both documents for comparison (sort keys, compact)
+    local current_normalized desired_normalized
+    current_normalized=$(echo "$current_document" | jq -S '.')
+    desired_normalized=$(echo "$desired_document" | jq -S '.')
+
+    if [ "$current_normalized" = "$desired_normalized" ]; then
+        print_info "Custom extended permissions policy already up to date (skipping)"
+        return 0
+    fi
+
+    print_info "Policy document has changed, updating..."
+
+    # Check version count — AWS allows max 5 versions
+    local version_count
+    version_count=$(aws iam list-policy-versions --policy-arn "$policy_arn" \
+        --query 'length(Versions)' --output text 2>&1)
+    if [ $? -ne 0 ]; then
+        print_error "Failed to list policy versions: $version_count"
+        return 1
+    fi
+
+    if [ "$version_count" -ge 5 ]; then
+        # Delete oldest non-default version
+        local oldest_version
+        oldest_version=$(aws iam list-policy-versions --policy-arn "$policy_arn" \
+            --query "Versions[?IsDefaultVersion==\`false\`] | sort_by(@, &CreateDate) | [0].VersionId" \
+            --output text 2>&1)
+        if [ $? -ne 0 ] || [ "$oldest_version" = "None" ]; then
+            print_error "Failed to find a non-default version to delete: $oldest_version"
+            return 1
+        fi
+        print_info "Deleting oldest policy version $oldest_version to make room..."
+        aws iam delete-policy-version --policy-arn "$policy_arn" --version-id "$oldest_version"
+    fi
+
+    # Create new version and set as default
+    local update_output
+    update_output=$(aws iam create-policy-version \
+        --policy-arn "$policy_arn" \
+        --policy-document "$desired_document" \
+        --set-as-default 2>&1)
+    if [ $? -eq 0 ]; then
+        print_info "Custom extended permissions policy updated successfully"
+    else
+        print_error "Failed to update policy: $update_output"
+        return 1
+    fi
+}
+
 # Function to create custom extended permissions policy
 create_extended_policy() {
     local policy_name="FrugalExtendedReadOnly"
@@ -915,16 +1129,7 @@ create_extended_policy() {
 
     print_info "Checking for custom extended permissions policy..."
 
-    # Check if policy already exists
-    if aws iam get-policy --policy-arn "$policy_arn" &>/dev/null; then
-        print_info "Custom extended permissions policy already exists"
-        # Don't add to global array - will be attached separately per account
-        return 0
-    fi
-
-    print_info "Creating custom extended permissions policy..."
-
-    # Create policy document with billing and CloudWatch Logs permissions
+    # Policy document with billing, CloudWatch Logs, and Performance Insights permissions
     local policy_document='{
         "Version": "2012-10-17",
         "Statement": [
@@ -949,19 +1154,46 @@ create_extended_policy() {
                     "logs:FilterLogEvents"
                 ],
                 "Resource": "*"
+            },
+            {
+                "Sid": "PerformanceInsightsReadOnly",
+                "Effect": "Allow",
+                "Action": [
+                    "pi:GetResourceMetrics",
+                    "pi:DescribeDimensionKeys",
+                    "pi:GetDimensionKeyDetails"
+                ],
+                "Resource": "*"
             }
         ]
     }'
 
-    if aws iam create-policy \
+    # Check if policy already exists
+    if aws iam get-policy --policy-arn "$policy_arn" &>/dev/null; then
+        update_custom_policy_if_changed "$policy_arn" "$policy_document"
+        return $?
+    fi
+
+    print_info "Creating custom extended permissions policy..."
+
+    local create_output
+    create_output=$(aws iam create-policy \
         --policy-name "$policy_name" \
         --policy-document "$policy_document" \
-        --description "Extended read-only permissions for Cost Explorer, billing, and CloudWatch Logs" \
-        --tags "Key=Purpose,Value=FrugalIntegration" "Key=CreatedBy,Value=frugal-aws-setup"; then
+        --description "Extended read-only permissions for Cost Explorer, billing, CloudWatch Logs, and Performance Insights" \
+        --tags "Key=Purpose,Value=FrugalIntegration" "Key=CreatedBy,Value=frugal-aws-setup" 2>&1)
+
+    if [ $? -eq 0 ]; then
+        echo "$create_output"
         print_info "Custom extended permissions policy created successfully"
         # Don't add to global array - will be attached separately per account
+    elif echo "$create_output" | grep -q "EntityAlreadyExists"; then
+        # Race condition: policy was created between our check and create attempt
+        update_custom_policy_if_changed "$policy_arn" "$policy_document"
+        return $?
     else
         print_error "Failed to create custom extended permissions policy"
+        print_error "$create_output"
         return 1
     fi
 }
@@ -1114,9 +1346,9 @@ display_plan() {
     # Show custom policy for both WIF and IAM user modes
     local custom_policy_arn="arn:aws:iam::${ACCOUNT_ID}:policy/FrugalExtendedReadOnly"
     if echo "$current_policies" | grep -q "^${custom_policy_arn}$"; then
-        print_table_row "✓" "FrugalExtendedReadOnly (custom)" "Cost Explorer, billing, and CloudWatch Logs filtering"
+        print_table_row "✓" "FrugalExtendedReadOnly (custom)" "Cost Explorer, billing, CloudWatch Logs filtering, and Performance Insights"
     else
-        print_table_row "+" "FrugalExtendedReadOnly (custom)" "Cost Explorer, billing, and CloudWatch Logs filtering"
+        print_table_row "+" "FrugalExtendedReadOnly (custom)" "Cost Explorer, billing, CloudWatch Logs filtering, and Performance Insights"
     fi
     
     print_table_footer
@@ -1177,6 +1409,7 @@ display_summary() {
     echo "  - Billing dashboards and reports"
     echo "  - Budget and cost allocation data"
     echo "  - CloudWatch Logs FilterLogEvents for downloading log samples"
+    echo "  - RDS Performance Insights metrics and dimension keys"
     
     # Show next steps
     echo
@@ -1585,6 +1818,10 @@ main() {
             echo
             print_info "Processing ${#ADDITIONAL_ACCOUNTS[@]} additional account(s)..."
             print_info "Using AssumeRole with role name: ${ASSUME_ROLE_NAME}"
+
+            # Pre-check: verify current identity can assume roles in member accounts
+            verify_cross_account_access "${ADDITIONAL_ACCOUNTS[0]}" "$ASSUME_ROLE_NAME"
+
             for acc_id in "${ADDITIONAL_ACCOUNTS[@]}"; do
                 setup_single_account "$acc_id" false
             done

@@ -256,9 +256,10 @@ This removes all created resources including roles, users, policies, and credent
 **In each monitored AWS account, the script creates:**
 - 1 IAM Role (e.g., `frugal-readonly`)
 - 1 Custom IAM Policy (`FrugalExtendedReadOnly`)
-- 3 Policy Attachments:
+- 4 Policy Attachments:
   - `ViewOnlyAccess` (AWS managed)
   - `AmazonBedrockReadOnly` (AWS managed)
+  - `ComputeOptimizerReadOnlyAccess` (AWS managed)
   - `FrugalExtendedReadOnly` (custom)
 - Trust relationships for cross-account access
 
@@ -281,11 +282,14 @@ Both authentication methods receive identical permissions:
 |--------|----------------|
 | `ViewOnlyAccess` (AWS managed) | Read-only access to EC2, S3, RDS, Lambda, CloudWatch, and most AWS services |
 | `AmazonBedrockReadOnly` (AWS managed) | Read-only access to AWS Bedrock AI models, configuration, and diagnostics |
-| `FrugalExtendedReadOnly` (custom) | Cost Explorer, billing, budgets, and CloudWatch Logs filtering |
+| `ComputeOptimizerReadOnlyAccess` (AWS managed) | Read-only access to AWS Compute Optimizer rightsizing recommendations |
+| `FrugalExtendedReadOnly` (custom) | Cost Explorer, billing, CloudWatch Logs filtering, and Performance Insights |
 
 **Extended Permissions Details:**
-- **Cost Explorer & Billing**: View cost trends, analyze spending by service/region/tags, access budget alerts
+- **Cost Explorer & Billing**: View cost trends, analyze spending by service/region/tags
 - **CloudWatch Logs**: `logs:FilterLogEvents` permission for downloading log samples and analysis
+- **Performance Insights**: RDS database performance metrics and dimension key analysis
+- **Compute Optimizer**: Rightsizing recommendations for EC2, RDS, and other resources
 - **Organizations**: View organizational structure and accounts
 - **Bedrock AI**: View foundation models, custom models, guardrails, knowledge bases, agents, and invocation logging
 
@@ -318,13 +322,18 @@ The custom `FrugalExtendedReadOnly` policy provides access to:
 **Cost Explorer & Billing**:
 - View cost trends and forecasts
 - Analyze spending by service, region, or tags
-- Access budget alerts and recommendations
 - No additional setup required - works immediately after script completion
 
 **CloudWatch Logs**:
 - `logs:FilterLogEvents` permission for downloading log samples
 - Enables log analysis and troubleshooting
 - Available in both WIF and IAM user modes
+
+**Performance Insights**:
+- `pi:GetResourceMetrics` for RDS database performance metrics
+- `pi:DescribeDimensionKeys` for identifying top contributors to load
+- `pi:GetDimensionKeyDetails` for detailed dimension key information
+- Requires Performance Insights to be enabled on your RDS instances
 
 ## Security Features
 
