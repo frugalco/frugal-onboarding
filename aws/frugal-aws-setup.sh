@@ -1151,7 +1151,10 @@ create_extended_policy() {
                 "Sid": "CloudWatchLogsExtended",
                 "Effect": "Allow",
                 "Action": [
-                    "logs:FilterLogEvents"
+                    "logs:FilterLogEvents",
+                    "logs:StartQuery",
+                    "logs:GetQueryResults",
+                    "logs:StopQuery"
                 ],
                 "Resource": "*"
             },
@@ -1346,9 +1349,9 @@ display_plan() {
     # Show custom policy for both WIF and IAM user modes
     local custom_policy_arn="arn:aws:iam::${ACCOUNT_ID}:policy/FrugalExtendedReadOnly"
     if echo "$current_policies" | grep -q "^${custom_policy_arn}$"; then
-        print_table_row "✓" "FrugalExtendedReadOnly (custom)" "Cost Explorer, billing, CloudWatch Logs filtering, and Performance Insights"
+        print_table_row "✓" "FrugalExtendedReadOnly (custom)" "Cost Explorer, billing, CloudWatch Logs filtering/queries, and Performance Insights"
     else
-        print_table_row "+" "FrugalExtendedReadOnly (custom)" "Cost Explorer, billing, CloudWatch Logs filtering, and Performance Insights"
+        print_table_row "+" "FrugalExtendedReadOnly (custom)" "Cost Explorer, billing, CloudWatch Logs filtering/queries, and Performance Insights"
     fi
     
     print_table_footer
@@ -1409,6 +1412,7 @@ display_summary() {
     echo "  - Billing dashboards and reports"
     echo "  - Budget and cost allocation data"
     echo "  - CloudWatch Logs FilterLogEvents for downloading log samples"
+    echo "  - CloudWatch Logs Insights (StartQuery/GetQueryResults/StopQuery) for Lambda memory analysis"
     echo "  - RDS Performance Insights metrics and dimension keys"
     
     # Show next steps

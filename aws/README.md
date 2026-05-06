@@ -283,11 +283,11 @@ Both authentication methods receive identical permissions:
 | `ViewOnlyAccess` (AWS managed) | Read-only access to EC2, S3, RDS, Lambda, CloudWatch, and most AWS services |
 | `AmazonBedrockReadOnly` (AWS managed) | Read-only access to AWS Bedrock AI models, configuration, and diagnostics |
 | `ComputeOptimizerReadOnlyAccess` (AWS managed) | Read-only access to AWS Compute Optimizer rightsizing recommendations |
-| `FrugalExtendedReadOnly` (custom) | Cost Explorer, billing, CloudWatch Logs filtering, and Performance Insights |
+| `FrugalExtendedReadOnly` (custom) | Cost Explorer, billing, CloudWatch Logs filtering/queries, and Performance Insights |
 
 **Extended Permissions Details:**
 - **Cost Explorer & Billing**: View cost trends, analyze spending by service/region/tags
-- **CloudWatch Logs**: `logs:FilterLogEvents` permission for downloading log samples and analysis
+- **CloudWatch Logs**: `logs:FilterLogEvents` for log samples, `logs:StartQuery`/`GetQueryResults`/`StopQuery` for Logs Insights queries (Lambda memory analysis)
 - **Performance Insights**: RDS database performance metrics and dimension key analysis
 - **Compute Optimizer**: Rightsizing recommendations for EC2, RDS, and other resources
 - **Organizations**: View organizational structure and accounts
@@ -326,6 +326,7 @@ The custom `FrugalExtendedReadOnly` policy provides access to:
 
 **CloudWatch Logs**:
 - `logs:FilterLogEvents` permission for downloading log samples
+- `logs:StartQuery`, `logs:GetQueryResults`, `logs:StopQuery` for CloudWatch Logs Insights queries (Lambda memory utilization analysis)
 - Enables log analysis and troubleshooting
 - Available in both WIF and IAM user modes
 

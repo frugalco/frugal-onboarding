@@ -1,5 +1,10 @@
 # Changelog
 
+## [2026-05-06]
+
+### Added
+- CloudWatch Logs Insights read access for Lambda memory analysis
+
 ## [2026-04-29]
 
 ### Added
